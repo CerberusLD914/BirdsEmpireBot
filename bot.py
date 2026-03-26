@@ -23,6 +23,10 @@ class BirdsBot:
         # ⏱ control de venta
         self.next_sell_time = time.time() + random.randint(1, 60)
 
+        # 🎯 objetivo bloqueado
+        self.target_bird = None
+        self.target_eta = None
+
         self.birds_data = {
             "birds_a": {"cost": 1000, "prod": 42},
             "birds_b": {"cost": 5000, "prod": 221},
@@ -58,7 +62,7 @@ class BirdsBot:
             self.update_headers()
 
     def generate_new_token(self):
-        print("🔐 Generando token...")
+        print("🔐 Generando token.")
 
         bot = LoginBrowser()
         bot.open("https://web.telegram.org/k/")
@@ -123,11 +127,11 @@ class BirdsBot:
     def silver_per_sec(self, prod):
         return (prod / self.EGGS_TO_SILVER) / 3600
 
-    def choose_best_affordable(self, silver, eggs, prod):
+    def choose_target_bird(self, silver, eggs, prod):
         effective = silver + (eggs / self.EGGS_TO_SILVER)
         income_sec = self.silver_per_sec(prod)
 
-        MAX_WAIT = 3600  # 1h
+        MAX_WAIT = 3600  # 1 hora
 
         best = None
         best_cost = -1
@@ -142,12 +146,14 @@ class BirdsBot:
             missing = max(0, cost - effective)
             time_to_buy = missing / income_sec if income_sec > 0 else float("inf")
 
+            # Mejor pájaro alcanzable dentro del tiempo máximo
             if time_to_buy <= MAX_WAIT:
                 if cost > best_cost:
                     best = bird
                     best_cost = cost
                     best_time = time_to_buy
 
+            # Si ninguno entra en MAX_WAIT, usar el más cercano
             if time_to_buy < fallback_time:
                 fallback = bird
                 fallback_time = time_to_buy
@@ -158,6 +164,9 @@ class BirdsBot:
         return fallback, fallback_time
 
     def format_time(self, seconds):
+        if seconds == float("inf"):
+            return "∞"
+
         seconds = int(seconds)
 
         if seconds < 60:
@@ -185,8 +194,8 @@ class BirdsBot:
 
         print("\n🧠 DECISIÓN")
         if best:
-            print(f"🐦 Objetivo : {best}")
-            print(f"⏳ ETA      : {self.format_time(eta)}")
+            print(f"🐦 Objetivo fijo : {best}")
+            print(f"⏳ ETA           : {self.format_time(eta)}")
         else:
             print("⏳ Esperando oportunidad...")
 
@@ -212,7 +221,11 @@ class BirdsBot:
                 silver = acc["amount_silver"]
                 prod = acc["total_productivity"]
 
-                # 🧠 venta con delay aleatorio
+                # Si no hay objetivo fijado, se elige uno y se bloquea
+                if self.target_bird is None:
+                    self.target_bird, self.target_eta = self.choose_target_bird(silver, eggs, prod)
+
+                # 💱 venta con delay aleatorio
                 if time.time() >= self.next_sell_time:
                     if eggs >= self.EGGS_TO_SILVER:
                         r = self.sell_eggs()
@@ -221,22 +234,29 @@ class BirdsBot:
                             eggs = data["amount_eggs"]
                             silver = data["amount_silver"]
 
-                    # nuevo tiempo random
                     self.next_sell_time = time.time() + random.randint(1, 20)
 
-                best, eta = self.choose_best_affordable(silver, eggs, prod)
+                # recalcular ETA del objetivo actual SIN cambiar objetivo
+                if self.target_bird:
+                    cost = self.birds_data[self.target_bird]["cost"]
+                    effective = silver + (eggs / self.EGGS_TO_SILVER)
+                    missing = max(0, cost - effective)
+                    income_sec = self.silver_per_sec(prod)
 
-                if best:
-                    cost = self.birds_data[best]["cost"]
+                    self.target_eta = missing / income_sec if income_sec > 0 else float("inf")
+
+                    # SOLO compra el objetivo fijado
                     qty = int(silver // cost)
 
                     if qty > 0:
-                        acc = self.buy_bird(best, qty)
+                        acc = self.buy_bird(self.target_bird, qty)
                         if acc:
+                            # liberar objetivo tras compra
+                            self.target_bird = None
+                            self.target_eta = None
                             continue
 
-                # 🖥 UI limpia
-                self.print_dashboard(eggs, silver, prod, best, eta)
+                self.print_dashboard(eggs, silver, prod, self.target_bird, self.target_eta)
 
                 time.sleep(0.1)
 
