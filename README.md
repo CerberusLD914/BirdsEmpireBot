@@ -1,6 +1,6 @@
 # 🐦 BirdsEmpireBot
 
-Bot automatizado para el juego **BirdsEmpire (Telegram WebApp)** que optimiza la recolección de huevos, conversión a silver y compra inteligente de aves.
+Bot automatizado para el juego **BirdsEmpire (Telegram WebApp)** que optimiza la recolección de huevos, conversión a silver y compra inteligente de aves. https://t.me/BirdsEmpireBot?start=940611
 
 ---
 
