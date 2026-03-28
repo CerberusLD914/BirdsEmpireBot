@@ -27,6 +27,9 @@ class BirdsBot:
         self.target_bird = None
         self.target_eta = None
 
+        # control de fallos consecutivos
+        self.fail_count = 0
+
         self.birds_data = {
             "birds_a": {"cost": 1000, "prod": 42},
             "birds_b": {"cost": 5000, "prod": 221},
@@ -42,11 +45,19 @@ class BirdsBot:
     def load_token(self):
         try:
             with open("telegram_token.json", "r", encoding="utf-8") as f:
-                return json.load(f)["decoded"]
-        except:
-            return None
+                data = json.load(f)
+                token = data.get("decoded")
+                if token and isinstance(token, str) and token.strip():
+                    return token.strip()
+        except Exception:
+            pass
+        return None
 
     def update_headers(self):
+        if not self.token:
+            self.headers = None
+            return
+
         self.headers = {
             "Authorization": f"tma {self.token}",
             "Accept": "application/json",
@@ -62,49 +73,99 @@ class BirdsBot:
             self.update_headers()
 
     def generate_new_token(self):
-        print("🔐 Generando token.")
+        print("🔐 Generando token...")
 
-        bot = LoginBrowser()
-        bot.open("https://web.telegram.org/k/")
+        while True:
+            bot = None
+            try:
+                bot = LoginBrowser()
+                bot.open("https://web.telegram.org/k/")
 
-        if not bot.is_logged_in():
-            bot.wait_for_login()
+                if not bot.is_logged_in():
+                    bot.wait_for_login()
 
-        bot.open_bot()
+                bot.open_bot()
 
-        time.sleep(10)
-        bot.driver.quit()
+                # esperar a que el archivo del token sea actualizado
+                for _ in range(30):
+                    time.sleep(2)
+                    token = self.load_token()
+                    if token:
+                        self.token = token
+                        self.update_headers()
+                        print("✅ Token regenerado correctamente")
+                        return
 
-        self.token = self.load_token()
-        self.update_headers()
+                print("⚠️ No se obtuvo token nuevo. Reintentando...")
+
+            except Exception as e:
+                print(f"❌ Error regenerando token: {e}")
+                print("🔁 Reintentando generación de token...")
+
+            finally:
+                try:
+                    if bot and bot.driver:
+                        bot.driver.quit()
+                except Exception:
+                    pass
+
+            time.sleep(5)
 
     def is_token_expired(self, r):
         if not r:
             return False
+
         if r.status_code in [401, 403]:
             return True
 
         try:
             txt = str(r.json()).lower()
-            return any(x in txt for x in ["unauthorized", "invalid", "expired"])
-        except:
+            return any(x in txt for x in ["unauthorized", "invalid", "expired", "token"])
+        except Exception:
             return False
 
     def safe_request(self, method, url, **kwargs):
-        r = requests.request(method, url, headers=self.headers, **kwargs)
+        while True:
+            try:
+                if not self.token or not self.headers:
+                    print("⚠️ No hay token válido. Regenerando...")
+                    self.generate_new_token()
 
-        if self.is_token_expired(r):
-            print("\n🔴 Token expirado → regenerando")
-            self.generate_new_token()
-            r = requests.request(method, url, headers=self.headers, **kwargs)
+                r = requests.request(method, url, headers=self.headers, timeout=20, **kwargs)
 
-        return r
+                if self.is_token_expired(r):
+                    print("\n🔴 Token expirado o inválido → regenerando...")
+                    self.generate_new_token()
+                    continue
+
+                return r
+
+            except requests.exceptions.RequestException as e:
+                print(f"\n🌐 Error de red/request: {e}")
+                print("🔁 Reintentando petición en 5 segundos...")
+                time.sleep(5)
+
+            except Exception as e:
+                print(f"\n❌ Error inesperado en request: {e}")
+                print("🔁 Regenerando token por seguridad...")
+                self.generate_new_token()
+                time.sleep(3)
 
     # ================= API =================
 
     def get_account(self):
         r = self.safe_request("GET", f"{BASE_URL}/users/account")
-        return r.json() if r else None
+        if not r:
+            return None
+
+        try:
+            data = r.json()
+            if isinstance(data, dict) and "amount_eggs" in data and "amount_silver" in data:
+                return data
+        except Exception:
+            pass
+
+        return None
 
     def sell_eggs(self):
         return self.safe_request("POST", f"{BASE_URL}/warehouse/sell_eggs")
@@ -116,9 +177,12 @@ class BirdsBot:
             json={bird: qty}
         )
 
-        if r and r.status_code == 200:
-            print(f"\n🐦 COMPRA: {bird} x{qty}")
-            return r.json()
+        try:
+            if r and r.status_code == 200:
+                print(f"\n🐦 COMPRA: {bird} x{qty}")
+                return r.json()
+        except Exception:
+            pass
 
         return None
 
@@ -131,7 +195,7 @@ class BirdsBot:
         effective = silver + (eggs / self.EGGS_TO_SILVER)
         income_sec = self.silver_per_sec(prod)
 
-        MAX_WAIT = 3600  # 1 hora
+        MAX_WAIT = 3600 * 5  # 5 horas
 
         best = None
         best_cost = -1
@@ -213,9 +277,20 @@ class BirdsBot:
         while True:
             try:
                 acc = self.get_account()
+
                 if not acc:
+                    self.fail_count += 1
+                    print(f"⚠️ No se pudo obtener account. Fallo #{self.fail_count}")
+
+                    if self.fail_count >= 3:
+                        print("🔁 Demasiados fallos seguidos. Regenerando token...")
+                        self.generate_new_token()
+                        self.fail_count = 0
+
                     time.sleep(3)
                     continue
+
+                self.fail_count = 0
 
                 eggs = acc["amount_eggs"]
                 silver = acc["amount_silver"]
@@ -229,10 +304,13 @@ class BirdsBot:
                 if time.time() >= self.next_sell_time:
                     if eggs >= self.EGGS_TO_SILVER:
                         r = self.sell_eggs()
-                        if r:
-                            data = r.json()
-                            eggs = data["amount_eggs"]
-                            silver = data["amount_silver"]
+                        try:
+                            if r and r.status_code == 200:
+                                data = r.json()
+                                eggs = data["amount_eggs"]
+                                silver = data["amount_silver"]
+                        except Exception:
+                            pass
 
                     self.next_sell_time = time.time() + random.randint(1, 20)
 
@@ -262,6 +340,7 @@ class BirdsBot:
 
             except Exception as e:
                 print("\n❌ Error:", e)
+                print("🔁 Intentando recuperar el bot...")
                 time.sleep(5)
 
 
